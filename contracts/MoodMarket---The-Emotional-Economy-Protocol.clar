@@ -1,4 +1,5 @@
 (define-non-fungible-token mood-nft uint)
+(define-non-fungible-token achievement-nft uint)
 (define-fungible-token empathy-token)
 
 (define-constant contract-owner tx-sender)
@@ -10,6 +11,7 @@
 (define-constant err-insufficient-balance (err u105))
 
 (define-data-var mood-nft-counter uint u0)
+(define-data-var achievement-nft-counter uint u0)
 (define-data-var total-empathy-distributed uint u0)
 (define-data-var emotional-weather uint u5)
 (define-data-var last-weather-update uint u0)
@@ -45,6 +47,22 @@
     reputation: uint
   })
 
+(define-map mood-streaks principal
+  {
+    current-streak: uint,
+    longest-streak: uint,
+    last-log-day: uint,
+    streak-bonus-earned: uint
+  })
+
+(define-map user-achievements principal
+  {
+    week-warrior: bool,
+    month-master: bool,
+    century-champion: bool,
+    consistency-king: bool
+  })
+
 (define-private (get-day-from-block (height uint))
   (/ height u144))
 
@@ -54,6 +72,81 @@
     (if (>= mood-score u4)
       u5
       u15)))
+
+(define-private (calculate-streak-bonus (streak uint))
+  (if (>= streak u100)
+    u50
+    (if (>= streak u30)
+      u25
+      (if (>= streak u7)
+        u10
+        u0))))
+
+(define-private (update-mood-streak (user principal) (current-day uint))
+  (let ((streak-data (default-to 
+    { current-streak: u0, longest-streak: u0, last-log-day: u0, streak-bonus-earned: u0 }
+    (map-get? mood-streaks user))))
+    (let ((last-day (get last-log-day streak-data))
+          (current-streak (get current-streak streak-data)))
+      (if (is-eq last-day (- current-day u1))
+        (let ((new-streak (+ current-streak u1)))
+          (map-set mood-streaks user {
+            current-streak: new-streak,
+            longest-streak: (if (> new-streak (get longest-streak streak-data))
+                             new-streak
+                             (get longest-streak streak-data)),
+            last-log-day: current-day,
+            streak-bonus-earned: (+ (get streak-bonus-earned streak-data) (calculate-streak-bonus new-streak))
+          })
+          new-streak)
+        (begin
+          (map-set mood-streaks user {
+            current-streak: u1,
+            longest-streak: (get longest-streak streak-data),
+            last-log-day: current-day,
+            streak-bonus-earned: (get streak-bonus-earned streak-data)
+          })
+          u1)))))
+
+(define-private (check-achievements (user principal) (streak uint))
+  (let ((achievements (default-to 
+    { week-warrior: false, month-master: false, century-champion: false, consistency-king: false }
+    (map-get? user-achievements user))))
+    (map-set user-achievements user {
+      week-warrior: (or (get week-warrior achievements) (>= streak u7)),
+      month-master: (or (get month-master achievements) (>= streak u30)),
+      century-champion: (or (get century-champion achievements) (>= streak u100)),
+      consistency-king: (or (get consistency-king achievements) 
+                           (>= (default-to u0 (get longest-streak (map-get? mood-streaks user))) u365))
+    })
+    (mint-achievement-nft user streak achievements)))
+
+(define-private (mint-achievement-nft (user principal) (streak uint) (old-achievements {week-warrior: bool, month-master: bool, century-champion: bool, consistency-king: bool}))
+  (let ((new-achievements (map-get? user-achievements user)))
+    (match new-achievements
+      achievements
+      (begin
+        (if (and (not (get week-warrior old-achievements)) (get week-warrior achievements))
+          (mint-achievement-for-milestone user "Week Warrior")
+          false)
+        (if (and (not (get month-master old-achievements)) (get month-master achievements))
+          (mint-achievement-for-milestone user "Month Master")
+          false)
+        (if (and (not (get century-champion old-achievements)) (get century-champion achievements))
+          (mint-achievement-for-milestone user "Century Champion")
+          false)
+        (if (and (not (get consistency-king old-achievements)) (get consistency-king achievements))
+          (mint-achievement-for-milestone user "Consistency King")
+          false)
+        true)
+      false)))
+
+(define-private (mint-achievement-for-milestone (user principal) (milestone (string-ascii 20)))
+  (let ((nft-id (+ (var-get achievement-nft-counter) u1)))
+    (var-set achievement-nft-counter nft-id)
+    (unwrap-panic (nft-mint? achievement-nft nft-id user))
+    (unwrap-panic (ft-mint? empathy-token u100 user))
+    true))
 
 (define-private (update-emotional-weather)
   (let ((current-day (get-day-from-block stacks-block-height)))
@@ -107,8 +200,11 @@
         negative-count: (if (< mood-score u5) (+ (get negative-count daily-data) u1) (get negative-count daily-data))
       }))
     
-    (try! (ft-mint? empathy-token reward-amount tx-sender))
-    (var-set total-empathy-distributed (+ (var-get total-empathy-distributed) reward-amount))
+    (let ((streak (update-mood-streak tx-sender current-day))
+          (bonus (calculate-streak-bonus streak)))
+      (try! (ft-mint? empathy-token (+ reward-amount bonus) tx-sender))
+      (var-set total-empathy-distributed (+ (var-get total-empathy-distributed) (+ reward-amount bonus)))
+      (check-achievements tx-sender streak))
     
     (unwrap-panic (update-emotional-weather))
     (ok nft-id)))
@@ -181,3 +277,16 @@
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (try! (ft-mint? empathy-token amount recipient))
     (ok amount)))
+
+(define-read-only (get-mood-streak (user principal))
+  (map-get? mood-streaks user))
+
+(define-read-only (get-user-achievements (user principal))
+  (map-get? user-achievements user))
+
+(define-read-only (get-streak-leaderboard)
+  {
+    total-achievement-nfts: (var-get achievement-nft-counter),
+    streak-multiplier-active: (> (var-get emotional-weather) u6),
+    community-consistency: (/ (var-get mood-nft-counter) (if (> stacks-block-height u0) (get-day-from-block stacks-block-height) u1))
+  })
