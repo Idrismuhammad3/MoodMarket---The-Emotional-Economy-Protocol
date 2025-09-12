@@ -63,6 +63,8 @@
     consistency-king: bool
   })
 
+(define-map user-mood-targets principal uint)
+
 (define-private (get-day-from-block (height uint))
   (/ height u144))
 
@@ -278,6 +280,12 @@
     (try! (ft-mint? empathy-token amount recipient))
     (ok amount)))
 
+(define-public (set-mood-target (target uint))
+  (begin
+    (asserts! (and (>= target u1) (<= target u10)) err-invalid-mood)
+    (map-set user-mood-targets tx-sender target)
+    (ok target)))
+
 (define-read-only (get-mood-streak (user principal))
   (map-get? mood-streaks user))
 
@@ -290,3 +298,15 @@
     streak-multiplier-active: (> (var-get emotional-weather) u6),
     community-consistency: (/ (var-get mood-nft-counter) (if (> stacks-block-height u0) (get-day-from-block stacks-block-height) u1))
   })
+
+(define-read-only (get-mood-target-progress (user principal))
+  (match (map-get? user-mood-targets user)
+    target
+    (let ((user-data (default-to { current-mood: u5, mood-count: u0, last-update: u0, empathy-earned: u0 } (map-get? user-moods user))))
+      (let ((current-avg (if (> (get mood-count user-data) u0) (/ (get empathy-earned user-data) (get mood-count user-data)) u5)))
+        (some {
+          target: target,
+          current-average: current-avg,
+          progress-percentage: (if (> target u0) (/ (* current-avg u100) target) u0)
+        })))
+    none))
