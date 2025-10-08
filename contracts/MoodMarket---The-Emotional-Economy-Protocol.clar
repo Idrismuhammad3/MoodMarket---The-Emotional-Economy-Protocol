@@ -65,6 +65,28 @@
 
 (define-map user-mood-targets principal uint)
 
+(define-data-var challenge-counter uint u0)
+
+(define-map mood-challenges uint
+  {
+    creator: principal,
+    description: (string-ascii 100),
+    target-mood: uint,
+    duration-days: uint,
+    reward-pool: uint,
+    start-day: uint,
+    active: bool
+  })
+
+(define-map user-challenge-participation {user: principal, challenge-id: uint}
+  {
+    joined-day: uint,
+    logs-count: uint,
+    completed: bool
+  })
+
+(define-map user-current-challenge principal uint)
+
 (define-private (get-day-from-block (height uint))
   (/ height u144))
 
@@ -207,7 +229,28 @@
       (try! (ft-mint? empathy-token (+ reward-amount bonus) tx-sender))
       (var-set total-empathy-distributed (+ (var-get total-empathy-distributed) (+ reward-amount bonus)))
       (check-achievements tx-sender streak))
-    
+
+    (match (map-get? user-current-challenge tx-sender)
+      challenge-id
+      (match (map-get? mood-challenges challenge-id)
+        challenge
+        (if (and (get active challenge) (>= mood-score (get target-mood challenge)))
+          (let ((participation (unwrap-panic (map-get? user-challenge-participation {user: tx-sender, challenge-id: challenge-id}))))
+            (let ((new-count (+ (get logs-count participation) u1)))
+              (map-set user-challenge-participation {user: tx-sender, challenge-id: challenge-id}
+                (merge participation {logs-count: new-count}))
+              (if (>= new-count (get duration-days challenge))
+                (begin
+                  (try! (ft-mint? empathy-token (get reward-pool challenge) tx-sender))
+                  (map-delete user-current-challenge tx-sender)
+                  (map-set user-challenge-participation {user: tx-sender, challenge-id: challenge-id}
+                    (merge participation {logs-count: new-count, completed: true}))
+                  true)
+                true)))
+          false)
+        false)
+      false)
+
     (unwrap-panic (update-emotional-weather))
     (ok nft-id)))
 
@@ -286,6 +329,40 @@
     (map-set user-mood-targets tx-sender target)
     (ok target)))
 
+(define-public (create-mood-challenge (description (string-ascii 100)) (target-mood uint) (duration-days uint) (reward-pool uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (and (>= target-mood u1) (<= target-mood u10)) err-invalid-mood)
+    (asserts! (> duration-days u0) err-invalid-mood)
+    (let ((challenge-id (+ (var-get challenge-counter) u1)))
+      (var-set challenge-counter challenge-id)
+      (map-set mood-challenges challenge-id
+        {
+          creator: tx-sender,
+          description: description,
+          target-mood: target-mood,
+          duration-days: duration-days,
+          reward-pool: reward-pool,
+          start-day: (get-day-from-block stacks-block-height),
+          active: true
+        })
+      (ok challenge-id))))
+
+(define-public (join-mood-challenge (challenge-id uint))
+  (begin
+    (asserts! (is-some (map-get? mood-challenges challenge-id)) err-not-found)
+    (let ((challenge (unwrap-panic (map-get? mood-challenges challenge-id))))
+      (asserts! (get active challenge) err-not-found)
+      (asserts! (is-none (map-get? user-current-challenge tx-sender)) err-already-exists)
+      (map-set user-current-challenge tx-sender challenge-id)
+      (map-set user-challenge-participation {user: tx-sender, challenge-id: challenge-id}
+        {
+          joined-day: (get-day-from-block stacks-block-height),
+          logs-count: u0,
+          completed: false
+        })
+      (ok true))))
+
 (define-read-only (get-mood-streak (user principal))
   (map-get? mood-streaks user))
 
@@ -310,3 +387,12 @@
           progress-percentage: (if (> target u0) (/ (* current-avg u100) target) u0)
         })))
     none))
+
+(define-read-only (get-mood-challenge (id uint))
+  (map-get? mood-challenges id))
+
+(define-read-only (get-user-challenge-participation (user principal) (challenge-id uint))
+  (map-get? user-challenge-participation {user: user, challenge-id: challenge-id}))
+
+(define-read-only (get-user-current-challenge (user principal))
+  (map-get? user-current-challenge user))
